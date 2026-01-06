@@ -1,0 +1,9 @@
+1. Python 的创始人是谁？
+A. Bill Gates
+B. Guido van Rossum
+C. Linus Torvalds
+D. Tim Berners-Lee
+
+2. HTTP 状态码 200 表示______。
+
+3. 简述 REST API 的核心设计原则。
