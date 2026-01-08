@@ -52,10 +52,16 @@ def _extract_inline_bracket_answers(text: str) -> dict:
 
 
 def _extract_fill_answer(stem_with_ans: str, stem_without_ans: str) -> Optional[str]:
-    """Extract fill answers using diff comparison."""
+    """Extract fill answers; first use bracket capture, fallback to diff."""
     pieces = []
-    
-    # 使用diff直接对比无答案版和带答案版，提取差异部分
+    bracket_matches = re.findall(r"（([^）]+)）|\(([^)]+)\)", stem_with_ans)
+    for m1, m2 in bracket_matches:
+        val = m1 or m2
+        if val:
+            pieces.append(val.strip())
+    if pieces:
+        return "；".join(pieces)
+
     matcher = SequenceMatcher(None, stem_without_ans, stem_with_ans)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "insert":
@@ -63,16 +69,8 @@ def _extract_fill_answer(stem_with_ans: str, stem_without_ans: str) -> Optional[
             if segment:
                 segment = segment.strip("（）() ")
                 pieces.append(segment)
-        elif tag == "replace":
-            # 处理空格被替换为答案的情况（列车运行题库的填空格式）
-            # 例如："方向 并" -> "方向相同并"
-            replaced_segment = stem_with_ans[j1:j2].strip()
-            if replaced_segment and stem_without_ans[i1:i2].strip() == '':
-                # 如果被替换的部分是空格，则替换内容就是答案
-                pieces.append(replaced_segment)
     if pieces:
         return "；".join(pieces)
-    return None
     return None
 
 
@@ -93,37 +91,22 @@ def _align_by_sequence(with_ans_text: str, without_ans_text: str, questions: Lis
 def align_answers(with_ans_text: Optional[str], without_ans_text: str) -> List[Question]:
     base_questions = [Question(**q) for q in detect_questions(without_ans_text)]
 
-    if with_ans_text:        # 方案0：优先提取内嵌括号答案（如：（  对  ）、（  B  ）)
-        bracket_answers = _extract_inline_bracket_answers(with_ans_text)
-        if bracket_answers:
-            with_ans_lines = with_ans_text.splitlines()
-            for q in base_questions:
-                # 只为判断题匹配括号答案
-                if q.type == 'judge' and q.stem:
-                    # 在含答案文本中找到这道题的题干
-                    for line_idx, line in enumerate(with_ans_lines):
-                        if q.stem[:min(20, len(q.stem))] in line:
-                            if line_idx in bracket_answers:
-                                q.answer = bracket_answers[line_idx]
-                                break
-        
+    if with_ans_text:
         extracted = _extract_answers_from_text(with_ans_text)
 
         # 方案1：显式“答案：”行
         if extracted and len(extracted) == len(base_questions):
             for q, ans in zip(base_questions, extracted):
-                if not q.answer:  # 不覆盖已有的内嵌答案
-                    q.answer = ans
+                q.answer = ans
             return base_questions
         if extracted and len(extracted) <= len(base_questions):
             for idx, ans in enumerate(extracted):
-                if not base_questions[idx].answer:
-                    base_questions[idx].answer = ans
+                base_questions[idx].answer = ans
 
         # 方案2：行尾附字母的选择题（如 “1、……。A”）
         inline_choice = _extract_inline_choice_answers(with_ans_text)
         if inline_choice:
-            choice_idxs = [i for i, q in enumerate(base_questions) if q.type == "choice" and not q.answer]
+            choice_idxs = [i for i, q in enumerate(base_questions) if q.type == "choice"]
             for ans, idx in zip(inline_choice, choice_idxs):
                 base_questions[idx].answer = ans
 

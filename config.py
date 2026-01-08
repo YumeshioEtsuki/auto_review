@@ -7,6 +7,9 @@ FILL_MARKERS = ["____", "______", "（ ）", "( )", "___", "________"]
 SHORT_QUESTION_PREFIXES = ["简述", "解释", "论述", "说明", "为什么", "如何", "什么是", "试述"]
 ANSWER_LINE_PATTERN: Pattern[str] = re.compile(r"答案\s*[:：]\s*(.+)")
 
+# 判断题标记：题干末尾的括号（带空格或不带），可能后面跟页码
+JUDGE_PATTERN: Pattern[str] = re.compile(r'[（\(]\s*\s*[）\)](?:P\d+)?$')
+
 # 多选题的关键词标记（答案行中出现这些词时，判定为多选题）
 MULTI_CHOICE_KEYWORDS = ["多个", "都对", "均正确", "都正确", "全选", "皆正确", "全对"]
 

@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from config import (
     ANSWER_LINE_PATTERN,
     FILL_MARKERS,
+    JUDGE_PATTERN,
     OPTION_PATTERN,
     QUESTION_START_PATTERN,
     SECTION_PATTERN,
@@ -26,6 +27,10 @@ def _detect_type(stem: str, options: List[str], has_multiple_correct: bool = Fal
         options: 选项列表
         has_multiple_correct: 是否有多个正确答案的标记（用于区分多选题）
     """
+    # 判断题检测：题干末尾有 (     ) 或 （     ）
+    if JUDGE_PATTERN.search(stem):
+        return 'judge'
+    
     if options:
         # 如果有4个或更多选项 + 多个正确答案标记，判定为多选题
         if len(options) >= 4 and has_multiple_correct:
@@ -33,6 +38,26 @@ def _detect_type(stem: str, options: List[str], has_multiple_correct: bool = Fal
         return "choice"
     if any(marker in stem for marker in FILL_MARKERS):
         return "fill"
+    
+    # 新增：检测句中单独空格（列车运行题库的填空格式）
+    # 1. 汉字+空格+汉字：例如"方向 并"
+    # 2. 汉字+空格+标点：例如"产生 ，"（空格在标点前）
+    # 3. 引号中的空格：例如"" "" 或 " " - 单独处理
+    
+    # 先检查引号中是否有空格（通常是填空位置）
+    # 支持多种引号：" " "" "" ' '
+    if re.search(r'[""\u201c](\s+)[""\u201d]', stem):
+        return 'fill'
+    
+    # 再检查汉字后的空格（排除引号部分）
+    temp_stem = re.sub(r'[""\u201c][^"""\u201c\u201d]+[""\u201d]', '', stem)  # 移除引号内容
+    if re.search(r'[\u4e00-\u9fff]\s+[\u4e00-\u9fff，。、；：！？）》]', temp_stem):
+        return 'fill'
+    
+    # 检测连续多个空格
+    if re.search(r'\s{2,}', stem):
+        return 'fill'
+    
     if any(stem.strip().startswith(prefix) for prefix in SHORT_QUESTION_PREFIXES):
         return "short"
     return "short"
