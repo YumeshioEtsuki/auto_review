@@ -225,6 +225,11 @@ with st.form(key=f"form_{question['id']}"):
         result = evaluate_answer(q_type, user_answer, question.get("answer"), question.get("options"))
         if result is True:
             st.success("✓ 回答正确！")
+            # 判对后自动跳下一题
+            if st.session_state.get("auto_next", True):
+                if st.session_state.idx < len(questions) - 1:
+                    st.session_state.idx += 1
+                    st.rerun()
         elif result is False:
             st.error("✗ 回答错误")
             if st.checkbox("加入错题本", key=f"wrong_{question['id']}"):
