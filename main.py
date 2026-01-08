@@ -90,6 +90,8 @@ def main():
             subprocess.run([sys.executable, "-m", "streamlit", "run", "ui/streamlit_app.py"], check=True)
         except subprocess.CalledProcessError as exc:  # noqa: PERF203
             logger.error("启动 Streamlit 失败: %s", exc)
+        except KeyboardInterrupt:
+            logger.info("用户停止了应用")
 
 
 if __name__ == "__main__":
