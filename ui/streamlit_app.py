@@ -47,6 +47,13 @@ def evaluate_answer(q_type: str, user_ans, correct_ans: str, options: list[str] 
 
     if q_type == "judge":
         user_token = normalize_tokens(user_ans)
+        # 统一映射：正确/对/√/T -> 对，错误/错/×/F -> 错
+        if user_token:
+            first = user_token[0]
+            if first in ['正确', '对', '√', 't', 'true', 'yes']:
+                user_token = ['对']
+            elif first in ['错误', '错', '×', 'f', 'false', 'no']:
+                user_token = ['错']
         return bool(user_token) and user_token[0] in correct_tokens
 
     if q_type == "multi":
@@ -184,7 +191,15 @@ with col1:
 with col2:
     st.metric("进度", f"{st.session_state.idx + 1}/{len(questions)}")
 
-st.write(question.get("stem"))
+# 显示题干，填空题中的空格用下划线标记
+stem_text = question.get("stem")
+if q_type == "fill" and stem_text:
+    # 将句中的单独空格或引号中的空格替换为下划线
+    stem_text = re.sub(r'[""](\s+)[""]', ' **______** ', stem_text)  # 引号中的空格
+    stem_text = re.sub(r'([\u4e00-\u9fff])\s+([\u4e00-\u9fff，。、；：！？）》])', r'\1 **______** \2', stem_text)  # 汉字间的空格
+    st.markdown(stem_text)
+else:
+    st.write(stem_text)
 
 user_key = f"user_answer_{question['id']}"
 
@@ -200,7 +215,7 @@ with st.form(key=f"form_{question['id']}"):
     elif q_type == "fill":
         user_answer = st.text_input("填写答案：", key=user_key)
     elif q_type == "judge":
-        user_answer = st.radio("判断题：", ["正确", "错误"], key=user_key)
+        user_answer = st.radio("判断题：", ["对", "错"], key=user_key)
     else:
         user_answer = st.text_area("作答：", key=user_key)
 
