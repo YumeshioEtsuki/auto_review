@@ -21,6 +21,52 @@ def _extract_answers_from_text(text: str) -> List[str]:
     return answers
 
 
+def _extract_inline_indexed_answers(text: str) -> dict[int, str]:
+    """提取"答案：1.答案1 2.答案2 3.答案3..."格式的答案
+    
+    支持跨行答案（如答案分散到多行）
+    只使用第一个"答案："标记之后的内容
+    
+    Returns:
+        {题号: 答案} 字典，如 {1: "控制", 2: "外部", ...}
+    """
+    answer_map = {}
+    
+    # 找到第一个"答案："行
+    lines = text.splitlines()
+    start_idx = -1
+    for i, line in enumerate(lines):
+        if '答案：' in line:
+            start_idx = i
+            break
+    
+    if start_idx == -1:
+        return answer_map
+    
+    # 从该行开始，合并相邻的答案行，直到遇到非答案行
+    combined = lines[start_idx].replace('答案：', '').replace('参考答案：', '')
+    
+    for i in range(start_idx + 1, len(lines)):
+        next_line = lines[i].strip()
+        
+        # 如果下一行是答案的延续（以数字开头）且不是新的答案行标记，则合并
+        if next_line and next_line[0].isdigit() and '答案：' not in next_line and '参考答案：' not in next_line:
+            combined += next_line
+        else:
+            # 遇到非答案行，停止
+            break
+    
+    # 提取答案对
+    matches = re.findall(r'(\d+)\.([^0-9]+?)(?=\d+\.|$)', combined)
+    for qid_str, answer in matches:
+        qid = int(qid_str)
+        answer = answer.strip().strip('（）() ')
+        if answer:
+            answer_map[qid] = answer
+    
+    return answer_map
+
+
 def _extract_inline_choice_answers(text: str) -> List[str]:
     """Capture trailing答案字母，如 "1、……。A" / "（ ）。B" / "( ) C"."""
     answers: List[str] = []
@@ -93,7 +139,16 @@ def _align_by_sequence(with_ans_text: str, without_ans_text: str, questions: Lis
 def align_answers(with_ans_text: Optional[str], without_ans_text: str) -> List[Question]:
     base_questions = [Question(**q) for q in detect_questions(without_ans_text)]
 
-    if with_ans_text:        # 方案0：优先提取内嵌括号答案（如：（  对  ）、（  B  ）)
+    if with_ans_text:
+        # 方案A：检查是否有"答案：1.xxx 2.xxx 3.xxx..."这种集中答案行
+        inline_indexed_answers = _extract_inline_indexed_answers(with_ans_text)
+        if inline_indexed_answers:
+            for q in base_questions:
+                if q.id in inline_indexed_answers:
+                    q.answer = inline_indexed_answers[q.id]
+            return base_questions
+        
+        # 方案0：优先提取内嵌括号答案（如：（  对  ）、（  B  ）)
         bracket_answers = _extract_inline_bracket_answers(with_ans_text)
         if bracket_answers:
             with_ans_lines = with_ans_text.splitlines()
