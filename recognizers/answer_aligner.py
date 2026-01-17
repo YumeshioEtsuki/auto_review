@@ -12,216 +12,202 @@ from recognizers.question_detector import detect_questions
 logger = logging.getLogger(__name__)
 
 
-def _extract_answers_from_text(text: str) -> List[str]:
-    answers: List[str] = []
-    for line in text.splitlines():
-        match = ANSWER_LINE_PATTERN.search(line)
-        if match:
-            answers.append(match.group(1).strip())
-    return answers
-
-
-def _extract_inline_indexed_answers(text: str) -> dict[int, str]:
-    """提取"答案：1.答案1 2.答案2 3.答案3..."格式的答案
-    
-    支持跨行答案（如答案分散到多行）
-    只使用第一个"答案："标记之后的内容
-    
-    Returns:
-        {题号: 答案} 字典，如 {1: "控制", 2: "外部", ...}
-    """
-    answer_map = {}
-    
-    # 找到第一个"答案："行
-    lines = text.splitlines()
-    start_idx = -1
-    for i, line in enumerate(lines):
-        if '答案：' in line:
-            start_idx = i
-            break
-    
-    if start_idx == -1:
-        return answer_map
-    
-    # 从该行开始，合并相邻的答案行，直到遇到非答案行
-    combined = lines[start_idx].replace('答案：', '').replace('参考答案：', '')
-    
-    for i in range(start_idx + 1, len(lines)):
-        next_line = lines[i].strip()
-        
-        # 如果下一行是答案的延续（以数字开头）且不是新的答案行标记，则合并
-        if next_line and next_line[0].isdigit() and '答案：' not in next_line and '参考答案：' not in next_line:
-            combined += next_line
-        else:
-            # 遇到非答案行，停止
-            break
-    
-    # 提取答案对
-    matches = re.findall(r'(\d+)\.([^0-9]+?)(?=\d+\.|$)', combined)
-    for qid_str, answer in matches:
-        qid = int(qid_str)
-        answer = answer.strip().strip('（）() ')
-        if answer:
-            answer_map[qid] = answer
-    
-    return answer_map
-
-
-def _extract_inline_choice_answers(text: str) -> List[str]:
-    """Capture trailing答案字母，如 "1、……。A" / "（ ）。B" / "( ) C"."""
-    answers: List[str] = []
-    for line in text.splitlines():
-        line = line.strip()
-        # 匹配行尾单个或多个答案字母（支持多选：ABCD）
-        m = re.match(r"^\d+[^\n]*?[。\.）\)]\s*([A-Ha-h]+)\s*$", line)
-        if m:
-            answers.append(m.group(1).strip())
-    return answers
-
-
-def _extract_inline_bracket_answers(text: str) -> dict:
-    """提取题干中的内嵌答案，如：（  对  ）、（  错  ）、（  B  ）
-    返回 {行号: 答案} 的字典
-    """
-    answer_map = {}
-    lines = text.splitlines()
-    
-    for idx, line in enumerate(lines):
-        # 匹配括号内的答案：（  对  ）、（  B  ）、（错）等
-        # 支持全角和半角括号，支持空格
-        matches = re.findall(r'[（\(]\s*([对错A-Ha-h]+)\s*[）\)]', line)
-        if matches:
-            # 取最后一个匹配（通常答案在题干末尾）
-            answer_map[idx] = matches[-1].strip()
-    
-    return answer_map
-
-
-def _extract_fill_answer(stem_with_ans: str, stem_without_ans: str) -> Optional[str]:
-    """Extract fill answers using diff comparison."""
-    pieces = []
-    
-    # 使用diff直接对比无答案版和带答案版，提取差异部分
-    matcher = SequenceMatcher(None, stem_without_ans, stem_with_ans)
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "insert":
-            segment = stem_with_ans[j1:j2].strip()
-            if segment:
-                segment = segment.strip("（）() ")
-                pieces.append(segment)
-        elif tag == "replace":
-            # 处理空格被替换为答案的情况（列车运行题库的填空格式）
-            # 例如："方向 并" -> "方向相同并"
-            replaced_segment = stem_with_ans[j1:j2].strip()
-            if replaced_segment and stem_without_ans[i1:i2].strip() == '':
-                # 如果被替换的部分是空格，则替换内容就是答案
-                pieces.append(replaced_segment)
-    if pieces:
-        return "；".join(pieces)
-    return None
-    return None
-
-
-def _align_by_sequence(with_ans_text: str, without_ans_text: str, questions: List[Question]) -> List[Question]:
-    matcher = SequenceMatcher(None, without_ans_text, with_ans_text)
-    opcodes = matcher.get_opcodes()
-    extra_segments: List[str] = []
-    for tag, i1, i2, j1, j2 in opcodes:
-        if tag == "insert":
-            extra_segments.append(with_ans_text[j1:j2].strip())
-    answers = [seg for seg in extra_segments if seg and len(seg) < 200]
-    for idx, ans in enumerate(answers):
-        if idx < len(questions) and questions[idx].answer is None:
-            questions[idx].answer = ans
-    return questions
-
-
 def align_answers(with_ans_text: Optional[str], without_ans_text: str) -> List[Question]:
+    """对齐答案与题目
+    
+    核心逻辑：
+    - 如果提供了两份不同的文本，按题型分块匹配
+    - 如果只提供一份文本（或两份相同），直接从"答案："行提取
+    """
     base_questions = [Question(**q) for q in detect_questions(without_ans_text)]
 
-    if with_ans_text:
-        # 方案A：检查是否有"答案：1.xxx 2.xxx 3.xxx..."这种集中答案行
-        inline_indexed_answers = _extract_inline_indexed_answers(with_ans_text)
-        if inline_indexed_answers:
-            for q in base_questions:
-                if q.id in inline_indexed_answers:
-                    q.answer = inline_indexed_answers[q.id]
-            return base_questions
-        
-        # 方案0：优先提取内嵌括号答案（如：（  对  ）、（  B  ）)
-        bracket_answers = _extract_inline_bracket_answers(with_ans_text)
-        if bracket_answers:
-            with_ans_lines = with_ans_text.splitlines()
-            for q in base_questions:
-                # 只为判断题匹配括号答案
-                if q.type == 'judge' and q.stem:
-                    # 在含答案文本中找到这道题的题干
-                    for line_idx, line in enumerate(with_ans_lines):
-                        if q.stem[:min(20, len(q.stem))] in line:
-                            if line_idx in bracket_answers:
-                                q.answer = bracket_answers[line_idx]
-                                break
-        
-        extracted = _extract_answers_from_text(with_ans_text)
-
-        # 方案1：显式“答案：”行
-        if extracted and len(extracted) == len(base_questions):
-            for q, ans in zip(base_questions, extracted):
-                if not q.answer:  # 不覆盖已有的内嵌答案
-                    q.answer = ans
-            return base_questions
-        if extracted and len(extracted) <= len(base_questions):
-            for idx, ans in enumerate(extracted):
-                if not base_questions[idx].answer:
-                    base_questions[idx].answer = ans
-
-        # 方案2：行尾附字母的选择题（如 “1、……。A”）
-        inline_choice = _extract_inline_choice_answers(with_ans_text)
-        if inline_choice:
-            choice_idxs = [i for i, q in enumerate(base_questions) if q.type == "choice" and not q.answer]
-            for ans, idx in zip(inline_choice, choice_idxs):
-                base_questions[idx].answer = ans
-
-        # 方案3：按题号对齐后，利用填空题插入差异抽取括号答案
-        answered_questions = [Question(**q) for q in detect_questions(with_ans_text)]
-
-        # 优先对等长情形直接按序对齐
-        if len(answered_questions) == len(base_questions):
-            iterable = zip(base_questions, answered_questions)
-        else:
-            iterable = []
-
-        for base, answered in iterable:
-            if base.answer:
-                continue
-            if base.type == "fill":
-                fill_ans = _extract_fill_answer(answered.stem, base.stem)
-                if fill_ans:
-                    base.answer = fill_ans
-            elif base.type == "choice" and answered.answer:
-                base.answer = answered.answer
-
-        # 如果数量不一致或仍有空缺，基于相似度匹配填空题
-        if answered_questions:
-            remaining = answered_questions.copy()
-            for base in base_questions:
-                if base.answer or base.type != "fill":
-                    continue
-                best_idx = -1
-                best_score = 0.0
-                for idx, cand in enumerate(remaining):
-                    score = SequenceMatcher(None, base.stem, cand.stem).ratio()
-                    if score > best_score:
-                        best_score = score
-                        best_idx = idx
-                if best_idx >= 0 and best_score >= 0.6:
-                    cand = remaining.pop(best_idx)
-                    fill_ans = _extract_fill_answer(cand.stem, base.stem)
-                    if fill_ans:
-                        base.answer = fill_ans
-
-        # 方案4：全局diff兜底
-        base_questions = _align_by_sequence(with_ans_text, without_ans_text, base_questions)
+    # 如果没有含答案文本，或与纯题干文本相同，则直接提取
+    if not with_ans_text or with_ans_text.strip() == without_ans_text.strip():
+        # 直接从 without_ans_text 中提取答案块
+        extract_answers_from_same_text(without_ans_text, base_questions)
         return base_questions
-
+    
+    # 如果有两份不同的文本，按题型分块匹配
+    extract_answers_by_type(with_ans_text, base_questions)
     return base_questions
+
+
+def extract_answers_from_same_text(text: str, questions: List[Question]) -> None:
+    """从同一份文本中提取答案（题目和答案在一起）
+    
+    策略：提取所有答案块，然后尝试将其与各题型的问题进行智能匹配
+    不假设题型顺序，而是通过答案内容的特征来确定属于哪种题型
+    """
+    # 提取答案块
+    lines = text.splitlines()
+    answer_blocks = []
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # 检测答案行开始
+        if re.match(r'^(答案|参考答案)\s*[:：]?', line):
+            # 提取答案行本身的内容（去掉前缀）
+            content = re.sub(r'^(答案|参考答案)\s*[:：]?\s*', '', line)
+            current_block = content if content else ""
+            
+            # 收集后续行，直到遇到新的答案标记或新的题型标记
+            i += 1
+            while i < len(lines):
+                next_line = lines[i].strip()
+                
+                # 遇到新的"答案："标记，停止当前块
+                if re.match(r'^(答案|参考答案)\s*[:：]?', next_line):
+                    break
+                
+                # 遇到题型标记（"一、"、"二、"等），停止
+                if re.match(r'^[一二三四五六七八九十]', next_line):
+                    break
+                
+                # 如果下一行非空
+                if next_line:
+                    if current_block:
+                        current_block += " " + next_line
+                    else:
+                        current_block = next_line
+                
+                i += 1
+            
+            # 保存答案块
+            if current_block.strip():
+                answer_blocks.append(current_block)
+            
+            continue
+        
+        i += 1
+    
+    # 按题型分组问题
+    type_groups = {}
+    for q in questions:
+        q_type = q.type or 'short'
+        if q_type not in type_groups:
+            type_groups[q_type] = []
+        type_groups[q_type].append(q)
+    
+    # 智能匹配：尝试每个答案块，根据其内容特征判断属于哪种题型，然后应用相应的解析规则
+    for answer_block in answer_blocks:
+        # 尝试按不同的题型解析答案块，看哪个能解析出合理数量的答案
+        
+        # 1. 尝试作为判断题答案（×√对错）
+        judge_matches = re.findall(r'(\d+)\s*[\.、]?\s*([×√对错])', answer_block)
+        # 2. 尝试作为选择题答案（A-H）
+        choice_matches = re.findall(r'(\d+)\s*[\.、]?\s*([A-Ha-h]+)', answer_block)
+        # 3. 尝试作为其他答案
+        other_matches = re.findall(r'(\d+)\s*[\.、]?\s*([^0-9]+?)(?=\d+\s*[\.、]|$)', answer_block)
+        
+        # 判断这个答案块最可能属于哪种题型
+        best_type = None
+        best_matches = None
+        
+        if judge_matches and len(judge_matches) >= 10:
+            best_type = 'judge'
+            best_matches = judge_matches
+        elif choice_matches and len(choice_matches) >= 10:
+            best_type = 'choice'
+            best_matches = choice_matches
+        elif other_matches and len(other_matches) >= 1:
+            # 判断是哪种"其他"类型（fill/short/comprehensive/case）
+            # 简单策略：看内容长度和内容特征
+            avg_len = sum(len(m[1]) for m in other_matches) / len(other_matches)
+            
+            # 检查是否包含问题-答案的叙述性内容（综合题特征）
+            block_text = answer_block.lower()
+            if '要点' in block_text or '特点' in block_text or '原因' in block_text or '方案' in block_text or '建议' in block_text:
+                # 这是综合/案例题
+                best_type = 'comprehensive' if len(answer_block) < 500 else 'case'
+            elif avg_len < 15:
+                best_type = 'fill'
+            elif avg_len < 100:
+                best_type = 'short'
+            else:
+                best_type = 'comprehensive'
+            best_matches = other_matches
+        
+        # 如果成功识别了题型，就应用匹配
+        if best_type and best_matches and best_type in type_groups:
+            questions_of_type = type_groups[best_type]
+            for seq_str, ans_str in best_matches:
+                try:
+                    seq = int(seq_str)
+                    idx = seq - 1
+                    if idx < len(questions_of_type):
+                        ans = ans_str.strip().strip('（）() ')
+                        q = questions_of_type[idx]
+                        if not q.answer:
+                            q.answer = ans
+                except (ValueError, IndexError):
+                    continue
+
+
+def extract_answers_by_type(with_ans_text: str, questions: List[Question]) -> None:
+    """从两份不同的文本中按题型分块提取答案"""
+    # 按题型分组题目，保持原顺序
+    type_groups = {}
+    type_order = []
+    for q in questions:
+        q_type = q.type or 'short'
+        if q_type not in type_groups:
+            type_groups[q_type] = []
+            type_order.append(q_type)
+        type_groups[q_type].append(q)
+    
+    # 提取答案块
+    lines = with_ans_text.splitlines()
+    answer_blocks = []
+    
+    current_block = ""
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        
+        if re.match(r'^(答案|参考答案)\s*[:：]?', stripped):
+            if current_block.strip():
+                answer_blocks.append(current_block)
+                current_block = ""
+            
+            content = re.sub(r'^(答案|参考答案)\s*[:：]?\s*', '', stripped)
+            current_block = content
+        elif current_block and stripped:
+            if re.match(r'^\d+[\.、]', stripped) or not re.match(r'^[一二三四五]', stripped):
+                current_block += " " + stripped
+            else:
+                if current_block.strip():
+                    answer_blocks.append(current_block)
+                    current_block = ""
+        elif current_block and not stripped:
+            continue
+    
+    if current_block.strip():
+        answer_blocks.append(current_block)
+    
+    # 按题型匹配
+    for block_idx, q_type in enumerate(type_order):
+        if block_idx >= len(answer_blocks):
+            break
+        
+        answer_text = answer_blocks[block_idx]
+        questions_of_type = type_groups[q_type]
+        
+        if q_type == 'judge':
+            matches = re.findall(r'(\d+)\s*[\.、]\s*([×√对错])', answer_text)
+        elif q_type == 'choice':
+            matches = re.findall(r'(\d+)\s*[\.、]\s*([A-Ha-h]+)', answer_text)
+        else:
+            matches = re.findall(r'(\d+)\s*[\.、]?\s*([^0-9]+?)(?=\d+\s*[\.、]|$)', answer_text)
+        
+        for qid_str, ans_str in matches:
+            try:
+                qid = int(qid_str)
+                ans = ans_str.strip().strip('（）() ')
+                for q in questions_of_type:
+                    if q.id == qid:
+                        if not q.answer:
+                            q.answer = ans
+                        break
+            except ValueError:
+                continue

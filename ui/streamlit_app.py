@@ -13,6 +13,19 @@ from recognizers.answer_aligner import align_answers
 
 st.set_page_config(page_title="AutoReview", page_icon="📚", layout="wide")
 
+TYPE_LABELS = {
+    "fill": "填空题",
+    "choice": "选择题",
+    "short": "简答题",
+    "comprehensive": "综合应用题",
+    "case": "案例分析题",
+    "judge": "判断题",
+}
+
+
+def get_type_label(q_type: str | None) -> str:
+    return TYPE_LABELS.get(q_type or "", q_type or "未知题型")
+
 
 def normalize_tokens(text: str) -> list[str]:
     if not text:
@@ -21,6 +34,30 @@ def normalize_tokens(text: str) -> list[str]:
     text = text.replace("；", ";").replace("，", ",")
     parts = re.split(r"[;，,、/\s]+", text)
     return [p.strip().lower() for p in parts if p.strip()]
+
+
+def sort_questions_by_type(questions: list[dict]) -> list[dict]:
+    """按题型排序问题
+    
+    排序顺序：填空题 -> 判断题 -> 选择题 -> 简答题 -> 综合应用题 -> 案例分析题
+    """
+    type_order = {
+        'fill': 0,           # 填空题
+        'judge': 1,          # 判断题
+        'choice': 2,         # 选择题（含多选）
+        'short': 3,          # 简答题
+        'comprehensive': 4,  # 综合应用题
+        'case': 5,           # 案例分析题
+    }
+    
+    # 按题型排序，相同题型的保持原顺序
+    sorted_questions = sorted(questions, key=lambda q: type_order.get(q.get('type'), 6))
+    
+    # 重新编号
+    for i, q in enumerate(sorted_questions, 1):
+        q['id'] = i
+    
+    return sorted_questions
 
 
 def _letters_to_options(letters: list[str], options: list[str]) -> list[str]:
@@ -78,8 +115,11 @@ with st.sidebar:
         st.session_state.wrong_book = []
     if "auto_next" not in st.session_state:
         st.session_state.auto_next = True
+    if "sort_by_type" not in st.session_state:
+        st.session_state.sort_by_type = False
 
     st.checkbox("判对后自动跳下一题", key="auto_next")
+    st.checkbox("按题型排序（填空→判断→选择→简答→综合应用→案例分析）", key="sort_by_type")
     
     mode = st.radio("选择输入方式", ["从文件夹选择", "直接上传文件"])
     
@@ -95,11 +135,15 @@ with st.sidebar:
             st.stop()
         
         with_ans_file = st.selectbox("含答案文档", ["(可选)"] + available_files, index=0)
-        without_ans_file = st.selectbox("纯题干文档", available_files, index=0)
+        without_ans_file = st.selectbox("纯题干文档", ["(可选)"] + available_files, index=0)
         
         if st.button("🚀 生成题库", type="primary"):
             with_path = None if with_ans_file == "(可选)" else str(raw_dir / with_ans_file)
-            without_path = str(raw_dir / without_ans_file)
+            without_path = None if without_ans_file == "(可选)" else str(raw_dir / without_ans_file)
+            
+            if not without_path and not with_path:
+                st.error("至少需要选择一份文件")
+                st.stop()
             
             with st.spinner("解析中..."):
                 def load_file(path):
@@ -111,11 +155,21 @@ with st.sidebar:
                 without_text = load_file(without_path)
                 with_text = load_file(with_path)
                 
-                if without_text:
+                if without_text or with_text:
+                    # 如果只有一份文本，两份都用它
+                    if not without_text:
+                        without_text = with_text
+                    if not with_text:
+                        with_text = without_text
+                    
                     questions = align_answers(with_text, without_text)
-                    st.session_state.questions = [q.model_dump() for q in questions]
+                    questions_list = [q.model_dump() for q in questions]
+                    # 应用排序
+                    if st.session_state.sort_by_type:
+                        questions_list = sort_questions_by_type(questions_list)
+                    st.session_state.questions = questions_list
                     st.session_state.idx = 0
-                    st.success(f"✓ 成功加载 {len(questions)} 道题")
+                    st.success(f"✓ 成功加载 {len(questions_list)} 道题")
                     st.rerun()
                 else:
                     st.error("文件解析失败")
@@ -144,9 +198,13 @@ with st.sidebar:
                 
                 if without_text:
                     questions = align_answers(with_text, without_text)
-                    st.session_state.questions = [q.model_dump() for q in questions]
+                    questions_list = [q.model_dump() for q in questions]
+                    # 应用排序
+                    if st.session_state.sort_by_type:
+                        questions_list = sort_questions_by_type(questions_list)
+                    st.session_state.questions = questions_list
                     st.session_state.idx = 0
-                    st.success(f"✓ 成功加载 {len(questions)} 道题")
+                    st.success(f"✓ 成功加载 {len(questions_list)} 道题")
                     st.rerun()
                 else:
                     st.error("文件解析失败")
@@ -155,7 +213,7 @@ with st.sidebar:
         st.write(f"共 {len(st.session_state.wrong_book)} 条")
         if st.session_state.wrong_book:
             for item in st.session_state.wrong_book:
-                st.markdown(f"**第 {item['id']} 题 ({item['type']})** - {item['stem']}")
+                st.markdown(f"**第 {item['id']} 题（{get_type_label(item.get('type'))}）** - {item['stem']}")
                 st.markdown(f"你的答案：{item['user_answer']}")
                 st.markdown(f"正确答案：{item['answer']}")
                 st.divider()
@@ -185,9 +243,15 @@ if "idx" not in st.session_state:
 question = questions[st.session_state.idx]
 q_type = question.get("type") or "short"
 
+type_priority = ["fill", "judge", "choice", "short", "comprehensive", "case"]
+available_types = [t for t in type_priority if any(q.get("type") == t for q in questions)]
+# 包含未在优先列表中的自定义题型
+extra_types = {t for t in (q.get("type") for q in questions) if t and t not in available_types}
+available_types.extend(sorted(extra_types))
+
 col1, col2 = st.columns([3, 1])
 with col1:
-    st.subheader(f"第 {question['id']} 题 ({q_type})")
+    st.subheader(f"第 {question['id']} 题（{get_type_label(q_type)}）")
 with col2:
     st.metric("进度", f"{st.session_state.idx + 1}/{len(questions)}")
 
@@ -264,3 +328,13 @@ with col3:
     if st.button("GO", use_container_width=True):
         st.session_state.idx = jump_to - 1
         st.rerun()
+    if available_types:
+        type_labels = [get_type_label(t) for t in available_types]
+        selected_label = st.selectbox("按题型跳转", type_labels, key="jump_type")
+        selected_type = available_types[type_labels.index(selected_label)]
+        if st.button("跳到该题型", use_container_width=True, key="jump_type_btn"):
+            for i, q in enumerate(questions):
+                if q.get("type") == selected_type:
+                    st.session_state.idx = i
+                    st.rerun()
+            st.warning("未找到该题型的题目")
